@@ -1,7 +1,6 @@
-project: rnshah9/pkg
+project: pkg
 target: pkg
-tests: null
 
 cmds:
-  - cmd: /repo/src/pkg add @@
+  - cmd: /repo/src/pkg add /test.tgz
     filepath: /test.tgz
