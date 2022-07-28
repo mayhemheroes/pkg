@@ -2,5 +2,4 @@ project: pkg
 target: pkg
 
 cmds:
-  - cmd: /repo/src/pkg add /test.tgz
-    filepath: /test.tgz
+  - cmd: /pkg add @@
