@@ -102,16 +102,37 @@ pkg_repo_binary_query(struct pkg_repo *repo, const char *cond, const char *patte
 	sqlite3_stmt	*stmt = NULL;
 	char *sql = NULL;
 	const char	*comp = NULL;
+	char basesql_quick[] = ""
+		"SELECT DISTINCT p.id, origin, p.name, p.name as uniqueid, version, comment, "
+		"prefix, desc, arch, maintainer, www, "
+		"licenselogic, flatsize, pkgsize, "
+		"cksum, manifestdigest, path AS repopath, '%s' AS dbname "
+		"FROM packages  as p "
+		" %s "
+		"%s%s%s "
+		"ORDER BY p.name;";
 	char basesql[] = ""
+		"WITH flavors AS "
+		"  (SELECT package_id, value.annotation AS flavor FROM pkg_annotation "
+		"   LEFT JOIN annotation tag ON pkg_annotation.tag_id = tag.annotation_id "
+		"   LEFT JOIN annotation value ON pkg_annotation.value_id = value.annotation_id "
+		"   WHERE tag.annotation = 'flavor') "
+
 		"SELECT DISTINCT p.id, origin, p.name, p.name as uniqueid, version, comment, "
 		"prefix, desc, arch, maintainer, www, "
 		"licenselogic, flatsize, pkgsize, "
 		"cksum, manifestdigest, path AS repopath, '%s' AS dbname "
 		"FROM packages  as p "
 		"LEFT JOIN pkg_categories ON p.id = pkg_categories.package_id "
-		"LEFT JOIN categories ON categories.id = pkg_categories.category_id %s"
+		"LEFT JOIN categories ON categories.id = pkg_categories.category_id "
+		"LEFT JOIN flavors ON flavors.package_id = p.id "
+		" %s "
 		"%s%s%s "
 		"ORDER BY p.name;";
+	char *bsql = basesql;
+
+	if (match == MATCH_INTERNAL)
+		bsql = basesql_quick;
 
 	if (match != MATCH_ALL && (pattern == NULL || pattern[0] == '\0'))
 		return (NULL);
@@ -120,9 +141,9 @@ pkg_repo_binary_query(struct pkg_repo *repo, const char *cond, const char *patte
 	if (comp == NULL)
 		comp = "";
 	if (cond == NULL)
-		xasprintf(&sql, basesql, repo->name, comp, "", "", "");
+		xasprintf(&sql, bsql, repo->name, comp, "", "", "");
 	else
-		xasprintf(&sql, basesql, repo->name, comp,
+		xasprintf(&sql, bsql, repo->name, comp,
 		    comp[0] != '\0' ? "AND (" : "WHERE ( ", cond + 7, " )");
 
 	stmt = prepare_sql(sqlite, sql);
@@ -264,6 +285,9 @@ pkg_repo_binary_search_how(match_t match)
 	case MATCH_ALL:
 		how = NULL;
 		break;
+	case MATCH_INTERNAL:
+		how = "%s = ?1";
+		break;
 	case MATCH_EXACT:
 		if (pkgdb_case_sensitive())
 			how = "%s = ?1";
@@ -271,7 +295,10 @@ pkg_repo_binary_search_how(match_t match)
 			how = "%s = ?1 COLLATE NOCASE";
 		break;
 	case MATCH_GLOB:
-		how = "%s GLOB ?1";
+		if (pkgdb_case_sensitive())
+			how = "%s GLOB ?1";
+		else
+			how = "%s GLOB ?1 COLLATE NOCASE";
 		break;
 	case MATCH_REGEX:
 		how = "%s REGEXP ?1";
@@ -296,7 +323,10 @@ pkg_repo_binary_build_search_query(xstring *sql, match_t match,
 		what = NULL;
 		break;
 	case FIELD_ORIGIN:
-		what = "categories.name || substr(origin, instr(origin, '/')) as mycat";
+		what = "categories.name || substr(origin, instr(origin, '/'))";
+		break;
+	case FIELD_FLAVOR:
+		what = "categories.name || substr(origin, instr(origin, '/')) || '@' || flavor";
 		break;
 	case FIELD_NAME:
 		what = "p.name";
@@ -320,8 +350,10 @@ pkg_repo_binary_build_search_query(xstring *sql, match_t match,
 		orderby = NULL;
 		break;
 	case FIELD_ORIGIN:
-		orderby = " ORDER BY mycat";
+		orderby = " ORDER BY origin";
 		break;
+	case FIELD_FLAVOR:
+		orderby = " ORDER BY p.name";
 	case FIELD_NAME:
 		orderby = " ORDER BY p.name";
 		break;
@@ -351,13 +383,19 @@ pkg_repo_binary_search(struct pkg_repo *repo, const char *pattern, match_t match
 	xstring	*sql = NULL;
 	char *sqlcmd = NULL;
 	const char	*multireposql = ""
+		"WITH flavors AS "
+		"  (SELECT package_id, value.annotation AS flavor FROM pkg_annotation "
+		"   LEFT JOIN annotation tag ON pkg_annotation.tag_id = tag.annotation_id "
+		"   LEFT JOIN annotation value ON pkg_annotation.value_id = value.annotation_id "
+		"   WHERE tag.annotation = 'flavor') "
 		"SELECT DISTINCT p.id, origin, p.name, version, comment, "
 		"prefix, desc, arch, maintainer, www, "
 		"licenselogic, flatsize, pkgsize, "
 		"cksum, path AS repopath, '%1$s' AS dbname, '%2$s' AS repourl "
 		"FROM packages  as p "
 		"LEFT JOIN pkg_categories ON p.id = pkg_categories.package_id "
-		"LEFT JOIN categories ON categories.id = pkg_categories.category_id ";
+		"LEFT JOIN categories ON categories.id = pkg_categories.category_id "
+		"LEFT JOIN flavors ON flavors.package_id = p.id ";
 
 	if (pattern == NULL || pattern[0] == '\0')
 		return (NULL);

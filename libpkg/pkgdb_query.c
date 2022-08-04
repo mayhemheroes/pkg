@@ -63,25 +63,33 @@ pkgdb_get_pattern_query(const char *pattern, match_t match)
 {
 	char		*checkorigin = NULL;
 	char		*checkuid = NULL;
+	char		*checkflavor = NULL;
 	const char	*comp = NULL;
 
 	if (pattern != NULL) {
 		checkuid = strchr(pattern, '~');
 		if (checkuid == NULL)
 			checkorigin = strchr(pattern, '/');
+		if (checkorigin != NULL)
+			checkflavor = strchr(checkorigin, '@');
 	}
 
 	switch (match) {
 	case MATCH_ALL:
 		comp = "";
 		break;
+	case MATCH_INTERNAL:
+		comp = " WHERE p.name = ?1";
+		break;
 	case MATCH_EXACT:
 		if (pkgdb_case_sensitive()) {
 			if (checkuid == NULL) {
 				if (checkorigin == NULL)
 					comp = " WHERE (p.name = ?1 OR p.name || '-' || version = ?1)";
-				else
+				else if (checkflavor == NULL)
 					comp = " WHERE (origin = ?1 OR categories.name || substr(origin, instr(origin, '/')) = ?1)";
+				else
+					comp = "WHERE (categories.name || substr(origin, instr(origin, '/')) || '@' || flavor = ?1)";
 			} else {
 				comp = " WHERE p.name = ?1";
 			}
@@ -90,22 +98,40 @@ pkgdb_get_pattern_query(const char *pattern, match_t match)
 				if (checkorigin == NULL)
 					comp = " WHERE (p.name = ?1 COLLATE NOCASE OR "
 					"p.name || '-' || version = ?1 COLLATE NOCASE)";
-				else
+				else if (checkflavor == NULL)
 					comp = " WHERE (origin = ?1 COLLATE NOCASE OR categories.name || substr(origin, instr(origin, '/'))  = ?1 COLLATE NOCASE)";
+				else
+					comp = "WHERE (categories.name || substr(origin, instr(origin, '/')) || '@' || flavor = ?1 COLLATE NOCASE)";
 			} else {
 				comp = " WHERE p.name = ?1 COLLATE NOCASE";
 			}
 		}
 		break;
 	case MATCH_GLOB:
-		if (checkuid == NULL) {
-			if (checkorigin == NULL)
-				comp = " WHERE (p.name GLOB ?1 "
-					"OR p.name || '-' || version GLOB ?1)";
-			else
-				comp = " WHERE (origin GLOB ?1 OR categories.name || substr(origin, instr(origin, '/')) GLOB ?1)";
-		} else {
-			comp = " WHERE p.name = ?1";
+		if (pkgdb_case_sensitive()) {
+			if (checkuid == NULL) {
+				if (checkorigin == NULL)
+					comp = " WHERE (p.name GLOB ?1 "
+						"OR p.name || '-' || version GLOB ?1)";
+				else if (checkflavor == NULL)
+					comp = " WHERE (origin GLOB ?1 OR categories.name || substr(origin, instr(origin, '/')) GLOB ?1)";
+				else
+					comp = "WHERE (categories.name || substr(origin, instr(origin, '/')) || '@' || flavor GLOB ?1)";
+			} else {
+				comp = " WHERE p.name GLOB ?1";
+			}
+		} else  {
+			if (checkuid == NULL) {
+				if (checkorigin == NULL)
+					comp = " WHERE (p.name GLOB ?1 COLLATE NOCASE "
+						"OR p.name || '-' || version GLOB ?1 COLLATE NOCASE)";
+				else if (checkflavor == NULL)
+					comp = " WHERE (origin GLOB ?1 COLLATE NOCASE OR categories.name || substr(origin, instr(origin, '/')) GLOB ?1 COLLATE NOCASE)";
+				else
+					comp = "WHERE (categories.name || substr(origin, instr(origin, '/')) || '@' || flavor GLOB ?1 COLLATE NOCASE)";
+			} else {
+				comp = " WHERE p.name GLOB ?1 COLLATE NOCASE";
+			}
 		}
 		break;
 	case MATCH_REGEX:
@@ -113,10 +139,12 @@ pkgdb_get_pattern_query(const char *pattern, match_t match)
 			if (checkorigin == NULL)
 				comp = " WHERE (p.name REGEXP ?1 "
 				    "OR p.name || '-' || version REGEXP ?1)";
+			else if (checkflavor == NULL)
+				comp = " WHERE (origin REGEXP ?1 OR categories.name || substr(origin, instr(origin, '/')) REGEXP ?1)";
 			else
-				comp = " WHERE (origin REGEXP ?1 OR categories.name || substr(origin, instr(origin, '/'))e  REGEXP ?1)";
+				comp = "WHERE (categories.name || substr(origin, instr(origin, '/')) || '@' || flavor REGEXP ?1)";
 		} else {
-			comp = " WHERE p.name = ?1";
+			comp = " WHERE p.name REGEXP ?1";
 		}
 		break;
 	}
@@ -138,20 +166,41 @@ pkgdb_query_cond(struct pkgdb *db, const char *cond, const char *pattern, match_
 
 	comp = pkgdb_get_pattern_query(pattern, match);
 
-	if (cond)
+	if (cond) {
+		sqlite3_snprintf(sizeof(sql), sql,
+				"WITH flavors AS "
+				"  (SELECT package_id, value.annotation AS flavor FROM pkg_annotation "
+				"   LEFT JOIN annotation tag ON pkg_annotation.tag_id = tag.annotation_id "
+				"   LEFT JOIN annotation value ON pkg_annotation.value_id = value.annotation_id "
+				"   WHERE tag.annotation = 'flavor') "
+				"SELECT DISTINCT p.id, origin, p.name, p.name as uniqueid, "
+				"   version, comment, desc, "
+				"   message, arch, maintainer, www, "
+				"   prefix, flatsize, licenselogic, automatic, "
+				"   locked, time, manifestdigest, vital "
+				"   FROM packages AS p "
+				"   LEFT JOIN pkg_categories ON p.id = pkg_categories.package_id "
+				"   LEFT JOIN categories ON categories.id = pkg_categories.category_id "
+				"   LEFT JOIN flavors ON flavors.package_id = p.id "
+				"    %s %s (%s) ORDER BY p.name;",
+					comp, pattern == NULL ? "WHERE" : "AND", cond + 7);
+	} else if (match == MATCH_INTERNAL) {
 		sqlite3_snprintf(sizeof(sql), sql,
 				"SELECT DISTINCT p.id, origin, p.name, p.name as uniqueid, "
 					"version, comment, desc, "
 					"message, arch, maintainer, www, "
 					"prefix, flatsize, licenselogic, automatic, "
 					"locked, time, manifestdigest, vital "
-					"FROM packages AS p "
-					"LEFT JOIN pkg_categories ON p.id = pkg_categories.package_id "
-					"LEFT JOIN categories ON categories.id = pkg_categories.category_id "
-					" %s %s (%s) ORDER BY p.name;",
-					comp, pattern == NULL ? "WHERE" : "AND", cond + 7);
-	else
+				"FROM packages AS p "
+				"%s"
+				" ORDER BY p.name", comp);
+	} else {
 		sqlite3_snprintf(sizeof(sql), sql,
+				"WITH flavors AS "
+				"  (SELECT package_id, value.annotation AS flavor FROM pkg_annotation "
+				"   LEFT JOIN annotation tag ON pkg_annotation.tag_id = tag.annotation_id "
+				"   LEFT JOIN annotation value ON pkg_annotation.value_id = value.annotation_id "
+				"   WHERE tag.annotation = 'flavor') "
 				"SELECT DISTINCT p.id, origin, p.name, p.name as uniqueid, "
 					"version, comment, desc, "
 					"message, arch, maintainer, www, "
@@ -160,8 +209,10 @@ pkgdb_query_cond(struct pkgdb *db, const char *cond, const char *pattern, match_
 				"FROM packages AS p "
 				"LEFT JOIN pkg_categories ON p.id = pkg_categories.package_id "
 				"LEFT JOIN categories ON categories.id = pkg_categories.category_id "
+				"LEFT JOIN flavors ON flavors.package_id = p.id "
 				"%s"
 				" ORDER BY p.name", comp);
+	}
 
 	if (sqlite3_prepare_v2(db->sqlite, sql, -1, &stmt, NULL) != SQLITE_OK) {
 		ERROR_SQLITE(db->sqlite, sql);

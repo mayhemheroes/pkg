@@ -1,8 +1,33 @@
+Changes from 1.18.99.2 to 1.18.99.3
+- fix regression creating hardlinks
+
+Changes from 1.18.99.1 to 1.18.99.2
+- fix directory path matching in the new extraction code
+
+Changes from 1.17.99.11 to 1.18.99.1
+- rework the extraction process to fix the case when a file becomes a directory
+  during an upgrade
+- fix a crash in pkg create
+- fix a crash in pkg version -PvL=
+- allow to deal with 240 character long filenames
+- fix an issue when disabling a repository resulting in breakage of the
+  repository list
+- fix querying licenses
+- fix packaging the lua deinstall scripts
+- add pkg.symlink to allow creating symlinks from lua scripts
+- performance improvements
+- sync libfetch with base bringing in socks proxy support
+
+Changes from 1.17.99.10 to 1.17.99.11
+- Fix performance issue while computing upgrades
+- Fix shlibs always considered as changed
+
 Changes from 1.17.99.9 to 1.17.99.10
 - greatly improve test coverage
 - many improvements in error handling for pkg fetch
 - Remove the deprecated pkg_get() function from the API
 - prevent @config files to be verified from pkg checksums checking
+- Remove ftp(s):// support
 - add tcp:// protocol support which allows to server packages form inetd
   and secure it via spiped for example
 - triggers can now be trigger when empty directories are added/removed
@@ -10,6 +35,21 @@ Changes from 1.17.99.9 to 1.17.99.10
 - speed up pkg which
 - Reduce the possibility to have a temporary file during package extraction
   which exceed NAME_MAX (maxium file name length)
+- If the pattern has a '/' in it, it now search origin and all other categories
+  as well
+  for example graphics/zathura and print/zathura will both match the zathura
+  package
+- If the pattern has a '/' in it and a @ it will also search for the flavor
+  <category>/<portname>@<flavor>
+  # pkg install "editors/vim@tiny" # will install the vim-tiny package
+  $ pkg search -g "editors/vim@*"
+  vim                            Improved version of the vi editor (console flavor)
+  vim-gtk2                       Improved version of the vi editor (gtk2 flavor)
+  vim-gtk3                       Improved version of the vi editor (gtk3 flavor)
+  vim-motif                      Improved version of the vi editor (motif flavor)
+  vim-tiny                       Improved version of the vi editor (tiny flavor)
+  vim-x11                        Improved version of the vi editor (x11 flavor)
+- portability: build and run on alpine (musl)
 
 Changes from 1.17.99.8 to 1.17.99.9
 - pkg add: only runs triggers at the end of the equivalent of a transaction

@@ -90,7 +90,7 @@ extern struct pkg_ctx ctx;
 */
 
 #define DB_SCHEMA_MAJOR	0
-#define DB_SCHEMA_MINOR	35
+#define DB_SCHEMA_MINOR	36
 
 #define DBVERSION (DB_SCHEMA_MAJOR * 1000 + DB_SCHEMA_MINOR)
 
@@ -126,10 +126,14 @@ pkgdb_regex(sqlite3_context *ctx, int argc, sqlite3_value **argv)
 	regex_t			*re;
 	int			 ret;
 
-	if (argc != 2 || (regex = sqlite3_value_text(argv[0])) == NULL ||
-		(str = sqlite3_value_text(argv[1])) == NULL) {
+	if (argc != 2) {
 		sqlite3_result_error(ctx, "SQL function regex() called "
-		    "with invalid arguments.\n", -1);
+		    "with invalid number of arguments.\n", -1);
+		return;
+	}
+	if ((regex = sqlite3_value_text(argv[0])) == NULL) {
+		sqlite3_result_error(ctx, "SQL function regex() called "
+		    "without a regular expression.\n", -1);
 		return;
 	}
 
@@ -152,8 +156,10 @@ pkgdb_regex(sqlite3_context *ctx, int argc, sqlite3_value **argv)
 		sqlite3_set_auxdata(ctx, 0, re, pkgdb_regex_delete);
 	}
 
-	ret = regexec(re, str, 0, NULL, 0);
-	sqlite3_result_int(ctx, (ret != REG_NOMATCH));
+	if ((str = sqlite3_value_text(argv[1])) != NULL) {
+		ret = regexec(re, str, 0, NULL, 0);
+		sqlite3_result_int(ctx, (ret != REG_NOMATCH));
+	}
 }
 
 void
@@ -338,8 +344,7 @@ pkgdb_init(sqlite3 *sdb)
 		"version TEXT NOT NULL,"
 		"comment TEXT NOT NULL,"
 		"desc TEXT NOT NULL,"
-		"mtree_id INTEGER REFERENCES mtree(id) ON DELETE RESTRICT"
-			" ON UPDATE CASCADE,"
+		"mtree_id INTEGER, "
 		"message TEXT,"
 		"arch TEXT NOT NULL,"
 		"maintainer TEXT NOT NULL, "
@@ -356,10 +361,6 @@ pkgdb_init(sqlite3 *sdb)
 		",vital INTEGER NOT NULL DEFAULT 0"
 	");"
 	"CREATE UNIQUE INDEX packages_unique ON packages(name);"
-	"CREATE TABLE mtree ("
-		"id INTEGER PRIMARY KEY,"
-		"content TEXT NOT NULL UNIQUE"
-	");"
 	"CREATE TABLE pkg_script ("
 		"package_id INTEGER REFERENCES packages(id) ON DELETE CASCADE"
 			" ON UPDATE CASCADE,"
@@ -561,100 +562,6 @@ pkgdb_init(sqlite3 *sdb)
 	"CREATE INDEX pkg_provides_id ON pkg_provides(package_id);"
 	"CREATE INDEX packages_origin ON packages(origin COLLATE NOCASE);"
 	"CREATE INDEX packages_name ON packages(name COLLATE NOCASE);"
-
-	"CREATE VIEW pkg_shlibs AS SELECT * FROM pkg_shlibs_required;"
-	"CREATE TRIGGER pkg_shlibs_update "
-		"INSTEAD OF UPDATE ON pkg_shlibs "
-	"FOR EACH ROW BEGIN "
-		"UPDATE pkg_shlibs_required "
-		"SET package_id = new.package_id, "
-		"  shlib_id = new.shlib_id "
-		"WHERE shlib_id = old.shlib_id "
-		"AND package_id = old.package_id; "
-	"END;"
-	"CREATE TRIGGER pkg_shlibs_insert "
-		"INSTEAD OF INSERT ON pkg_shlibs "
-	"FOR EACH ROW BEGIN "
-		"INSERT INTO pkg_shlibs_required (shlib_id, package_id) "
-		"VALUES (new.shlib_id, new.package_id); "
-	"END;"
-	"CREATE TRIGGER pkg_shlibs_delete "
-		"INSTEAD OF DELETE ON pkg_shlibs "
-	"FOR EACH ROW BEGIN "
-		"DELETE FROM pkg_shlibs_required "
-                "WHERE shlib_id = old.shlib_id "
-		"AND package_id = old.package_id; "
-	"END;"
-
-	"CREATE VIEW scripts AS SELECT package_id, script, type"
-                " FROM pkg_script ps JOIN script s"
-                " ON (ps.script_id = s.script_id);"
-        "CREATE TRIGGER scripts_update"
-                " INSTEAD OF UPDATE ON scripts "
-        "FOR EACH ROW BEGIN"
-                " INSERT OR IGNORE INTO script(script)"
-                " VALUES(new.script);"
-	        " UPDATE pkg_script"
-                " SET package_id = new.package_id,"
-                        " type = new.type,"
-	                " script_id = ( SELECT script_id"
-	                " FROM script WHERE script = new.script )"
-                " WHERE package_id = old.package_id"
-                        " AND type = old.type;"
-        "END;"
-        "CREATE TRIGGER scripts_insert"
-                " INSTEAD OF INSERT ON scripts "
-        "FOR EACH ROW BEGIN"
-                " INSERT OR IGNORE INTO script(script)"
-                " VALUES(new.script);"
-	        " INSERT INTO pkg_script(package_id, type, script_id) "
-	        " SELECT new.package_id, new.type, s.script_id"
-                " FROM script s WHERE new.script = s.script;"
-	"END;"
-	"CREATE TRIGGER scripts_delete"
-	        " INSTEAD OF DELETE ON scripts "
-        "FOR EACH ROW BEGIN"
-                " DELETE FROM pkg_script"
-                " WHERE package_id = old.package_id"
-                " AND type = old.type;"
-                " DELETE FROM script"
-                " WHERE script_id NOT IN"
-                         " (SELECT DISTINCT script_id FROM pkg_script);"
-	"END;"
-	"CREATE VIEW options AS "
-		"SELECT package_id, option, value "
-		"FROM pkg_option JOIN option USING(option_id);"
-	"CREATE TRIGGER options_update "
-		"INSTEAD OF UPDATE ON options "
-	"FOR EACH ROW BEGIN "
-		"UPDATE pkg_option "
-		"SET value = new.value "
-		"WHERE package_id = old.package_id AND "
-			"option_id = ( SELECT option_id FROM option "
-				      "WHERE option = old.option );"
-	"END;"
-	"CREATE TRIGGER options_insert "
-		"INSTEAD OF INSERT ON options "
-	"FOR EACH ROW BEGIN "
-		"INSERT OR IGNORE INTO option(option) "
-		"VALUES(new.option);"
-		"INSERT INTO pkg_option(package_id, option_id, value) "
-		"VALUES (new.package_id, "
-			"(SELECT option_id FROM option "
-			"WHERE option = new.option), "
-			"new.value);"
-	"END;"
-	"CREATE TRIGGER options_delete "
-		"INSTEAD OF DELETE ON options "
-	"FOR EACH ROW BEGIN "
-		"DELETE FROM pkg_option "
-		"WHERE package_id = old.package_id AND "
-			"option_id = ( SELECT option_id FROM option "
-					"WHERE option = old.option );"
-		"DELETE FROM option "
-		"WHERE option_id NOT IN "
-			"( SELECT DISTINCT option_id FROM pkg_option );"
-	"END;"
 	"CREATE TABLE requires("
 	"    id INTEGER PRIMARY KEY,"
 	"    require TEXT NOT NULL"
@@ -678,41 +585,6 @@ pkgdb_init(sqlite3 *sdb)
 		"type INTEGER,"
 		"UNIQUE(package_id, lua_script_id)"
 	");"
-	"CREATE VIEW lua_scripts AS "
-		"SELECT package_id, lua_script, type "
-		"FROM pkg_lua_script JOIN lua_script USING(lua_script_id);"
-	"CREATE TRIGGER lua_script_update "
-		"INSTEAD OF UPDATE ON lua_scripts "
-	"FOR EACH ROW BEGIN "
-		"UPDATE pkg_lua_script "
-		"SET type = new.type "
-		"WHERE package_id = old.package_id AND "
-		"lua_script_id = (SELECT lua_script_id FROM lua_script "
-			"WHERE lua_script = old.lua_script );"
-	"END;"
-	"CREATE TRIGGER lua_script_insert "
-		"INSTEAD OF INSERT ON lua_scripts "
-	"FOR EACH ROW BEGIN "
-		"INSERT OR IGNORE INTO lua_script(lua_script) "
-		"VALUES(new.lua_script);"
-		"INSERT INTO pkg_lua_script(package_id, lua_script_id, type) "
-		"VALUES (new.package_id, "
-			"(SELECT lua_script_id FROM lua_script "
-			"WHERE lua_script = new.lua_script), "
-			"new.type);"
-	"END;"
-	"CREATE TRIGGER lua_script_delete "
-		"INSTEAD OF DELETE ON lua_scripts "
-	"FOR EACH ROW BEGIN "
-		"DELETE FROM pkg_lua_script "
-		"WHERE package_id = old.package_id AND "
-			"lua_script_id = ( SELECT lua_script_id FROM lua_script "
-					   "WHERE lua_script = old.lua_script );"
-		"DELETE FROM lua_script "
-		"WHERE lua_script_id NOT IN "
-			"( SELECT DISTINCT lua_script_id from lua_script );"
-	"END;"
-
 	"PRAGMA user_version = %d;"
 	"COMMIT;"
 	;
@@ -1390,7 +1262,7 @@ typedef enum _sql_prstmt_index {
 static sql_prstmt sql_prepared_statements[PRSTMT_LAST] = {
 	[MTREE] = {
 		NULL,
-		"INSERT OR IGNORE INTO mtree(content) VALUES(?1)",
+		NULL,
 		"T",
 	},
 	[PKG] = {
@@ -1398,10 +1270,10 @@ static sql_prstmt sql_prepared_statements[PRSTMT_LAST] = {
 		"INSERT OR REPLACE INTO packages( "
 			"origin, name, version, comment, desc, message, arch, "
 			"maintainer, www, prefix, flatsize, automatic, "
-			"licenselogic, mtree_id, time, manifestdigest, dep_formula, vital)"
+			"licenselogic, time, manifestdigest, dep_formula, vital)"
 		"VALUES( ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, "
-		"?13, (SELECT id FROM mtree WHERE content = ?14), NOW(), ?15, ?16, ?17 )",
-		"TTTTTTTTTTIIITTTI",
+		"?13, NOW(), ?14, ?15, ?16 )",
+		"TTTTTTTTTTIIITTI",
 	},
 	[DEPS_UPDATE] = {
 		NULL,
@@ -1635,6 +1507,8 @@ prstmt_initialize(struct pkgdb *db)
 		sqlite = db->sqlite;
 
 		for (i = 0; i < PRSTMT_LAST; i++) {
+			if (SQL(i) == NULL)
+				continue;
 			STMT(i) = prepare_sql(sqlite, SQL(i));
 			if (STMT(i) == NULL)
 				return (EPKG_FATAL);
@@ -1742,7 +1616,7 @@ pkgdb_register_pkg(struct pkgdb *db, struct pkg *pkg, int forced,
 	ret = run_prstmt(PKG, pkg->origin, pkg->name, pkg->version,
 	    pkg->comment, pkg->desc, msg, arch, pkg->maintainer,
 	    pkg->www, pkg->prefix, pkg->flatsize, (int64_t)pkg->automatic,
-	    (int64_t)pkg->licenselogic, NULL, pkg->digest, pkg->dep_formula, (int64_t)pkg->vital);
+	    (int64_t)pkg->licenselogic, pkg->digest, pkg->dep_formula, (int64_t)pkg->vital);
 	if (ret != SQLITE_DONE) {
 		ERROR_STMT_SQLITE(s, STMT(PKG));
 		goto cleanup;
@@ -2378,8 +2252,6 @@ pkgdb_unregister_pkg(struct pkgdb *db, int64_t id)
 			"(SELECT DISTINCT category_id FROM pkg_categories)",
 		"licenses WHERE id NOT IN "
 			"(SELECT DISTINCT license_id FROM pkg_licenses)",
-		"mtree WHERE id NOT IN "
-			"(SELECT DISTINCT mtree_id FROM packages)",
 		/* TODO print the users that are not used anymore */
 		"users WHERE id NOT IN "
 			"(SELECT DISTINCT user_id FROM pkg_users)",

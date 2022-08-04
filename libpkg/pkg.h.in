@@ -187,6 +187,7 @@ typedef enum {
 	 * case insensitive according to pkgdb_case_sensitive()
 	 */
 	MATCH_REGEX,
+	MATCH_INTERNAL
 } match_t;
 
 /**
@@ -199,7 +200,8 @@ typedef enum {
 	FIELD_NAME,
 	FIELD_NAMEVER,
 	FIELD_COMMENT,
-	FIELD_DESC
+	FIELD_DESC,
+	FIELD_FLAVOR,
 } pkgdb_field;
 
 /**
@@ -1048,9 +1050,6 @@ int pkgdb_compact(struct pkgdb *db);
  */
 int pkg_add(struct pkgdb *db, const char *path, unsigned flags,
     struct pkg_manifest_key *keys, const char *location);
-
-int pkg_add_from_remote(struct pkgdb *db, const char *path, unsigned flags,
-    struct pkg_manifest_key *keys, const char *location, struct pkg *rp);
 
 #define PKG_ADD_UPGRADE			(1U << 0)
 /* (1U << 1) removed intentionally */

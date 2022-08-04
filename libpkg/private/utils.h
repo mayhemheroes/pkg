@@ -53,7 +53,16 @@ typedef tll(struct hardlink *) hardlinks_t;
 struct hardlink {
 	ino_t ino;
 	dev_t dev;
+	const char *path;
 };
+
+struct tempdir {
+	char name[MAXHOSTNAMELEN];
+	char temp[MAXHOSTNAMELEN];
+	size_t len;
+	int fd;
+};
+typedef tll(struct tempdir *) tempdirs_t;
 
 struct dns_srvinfo {
 	unsigned int type;
@@ -117,5 +126,6 @@ bool copy_file(int from, int to);
 void hidden_tempfile(char *buf, int buflen, const char *path);
 void append_random_suffix(char *buf, int buflen, int suffixlen);
 char *json_escape(const char *str);
+struct tempdir *open_tempdir(int rootfd, const char *path);
 
 #endif

@@ -102,6 +102,7 @@ pkg_jobs_new(struct pkg_jobs **j, pkg_jobs_t t, struct pkgdb *db)
 	(*j)->pinning = true;
 	(*j)->flags = PKG_FLAG_NONE;
 	(*j)->conservative = pkg_object_bool(pkg_config_get("CONSERVATIVE_UPGRADE"));
+	(*j)->triggers.dfd = -1;
 
 	return (EPKG_OK);
 }
@@ -187,6 +188,14 @@ pkg_jobs_free(struct pkg_jobs *j)
 	pkg_jobs_universe_free(j->universe);
 	LL_FREE(j->jobs, free);
 	LL_FREE(j->patterns, pkg_jobs_pattern_free);
+	if (j->triggers.cleanup != NULL) {
+		tll_free_and_free(*j->triggers.cleanup, trigger_free);
+		free(j->triggers.cleanup);
+	}
+	if (j->triggers.dfd != -1)
+		close(j->triggers.dfd);
+	if (j->triggers.schema != NULL)
+		ucl_object_unref(j->triggers.schema);
 	free(j);
 }
 
@@ -717,7 +726,7 @@ new_pkg_version(struct pkg_jobs *j)
 	}
 
 	/* Use maximum priority for pkg */
-	if (pkg_jobs_find_upgrade(j, uid, MATCH_EXACT) == EPKG_OK) {
+	if (pkg_jobs_find_upgrade(j, uid, MATCH_INTERNAL) == EPKG_OK) {
 		/*
 		 * Now we can have *potential* upgrades, but we can have a situation,
 		 * when our upgrade candidate comes from another repo
@@ -813,8 +822,7 @@ pkg_jobs_has_replacement(struct pkg_jobs *j, const char *uid)
 }
 
 static int
-pkg_jobs_try_remote_candidate(struct pkg_jobs *j, const char *cond, const char *pattern,
-    const char *uid, match_t m)
+pkg_jobs_try_remote_candidate(struct pkg_jobs *j, const char *cond, const char *pattern, match_t m)
 {
 	struct pkg *p = NULL;
 	struct pkgdb_it *it;
@@ -824,7 +832,6 @@ pkg_jobs_try_remote_candidate(struct pkg_jobs *j, const char *cond, const char *
 				PKG_LOAD_ANNOTATIONS|PKG_LOAD_CONFLICTS;
 	int rc = EPKG_FATAL;
 	xstring *qmsg = NULL;
-	struct pkg_job_universe_item *unit;
 
 	if ((it = pkgdb_repo_query_cond(j->db, cond, pattern, m, j->reponame)) == NULL)
 		return (EPKG_FATAL);
@@ -834,28 +841,6 @@ pkg_jobs_try_remote_candidate(struct pkg_jobs *j, const char *cond, const char *
 		if (pkg_jobs_has_replacement(j, p->uid)) {
 			pkg_debug(1, "replacement %s is already used", p->uid);
 			continue;
-		}
-
-		fprintf(qmsg->fp, "%s has no direct installation candidates, change it to "
-				"%s? ", uid, p->uid);
-		fflush(qmsg->fp);
-		if (pkg_emit_query_yesno(true, qmsg->buf)) {
-			/* Change the origin of the local package */
-			pkg_validate(p, j->db);
-			unit = pkg_jobs_universe_find(j->universe, uid);
-			if (unit != NULL)
-				pkg_jobs_universe_change_uid(j->universe, unit,
-				    p->uid, false);
-			else
-				assert(0);
-
-			rc = EPKG_OK;
-			pkg_jobs_process_remote_pkg(j, p, NULL, 0);
-			if (rc == EPKG_OK) {
-				/* Avoid freeing */
-				p = NULL;
-			}
-			break;
 		}
 	}
 
@@ -880,7 +865,7 @@ pkg_jobs_guess_upgrade_candidate(struct pkg_jobs *j, const char *pattern)
 	/* First of all, try to search a package with the same name */
 	pos = strchr(pattern, '/');
 	if (pos != NULL && pos[1] != '\0') {
-		if (pkg_jobs_try_remote_candidate(j, pos + 1, NULL, opattern, MATCH_EXACT)
+		if (pkg_jobs_try_remote_candidate(j, pos + 1, NULL, MATCH_INTERNAL)
 						== EPKG_OK)
 			return (EPKG_OK);
 
@@ -903,12 +888,12 @@ pkg_jobs_guess_upgrade_candidate(struct pkg_jobs *j, const char *pattern)
 		/* Try exact pattern without numbers */
 		cpy = xmalloc(len + 1);
 		strlcpy(cpy, pos, len + 1);
-		if (pkg_jobs_try_remote_candidate(j, cpy, NULL, opattern, MATCH_EXACT) != EPKG_OK) {
+		if (pkg_jobs_try_remote_candidate(j, cpy, NULL, MATCH_INTERNAL) != EPKG_OK) {
 			free(cpy);
-			cpy = sqlite3_mprintf(" WHERE name REGEXP ('^' || %.*Q || '[0-9.]*$')",
+			cpy = sqlite3_mprintf(" WHERE p.name REGEXP ('^' || %.*Q || '[0-9.]*$')",
 					len, pos);
 
-			if (pkg_jobs_try_remote_candidate(j, cpy, opattern, NULL, MATCH_ALL)
+			if (pkg_jobs_try_remote_candidate(j, cpy, opattern, MATCH_ALL)
 					== EPKG_OK)
 				rc = EPKG_OK;
 			sqlite3_free(cpy);
@@ -1028,7 +1013,7 @@ pkg_jobs_installed_local_pkg(struct pkg_jobs *j, struct pkg *pkg)
 {
 	struct job_pattern jfp;
 
-	jfp.match = MATCH_EXACT;
+	jfp.match = MATCH_INTERNAL;
 	jfp.pattern = pkg->name;
 	return (pkg_jobs_check_local_pkg(j, &jfp));
 }
@@ -1042,7 +1027,7 @@ pkg_jobs_find_remote_pattern(struct pkg_jobs *j, struct job_pattern *jp)
 	struct pkg_job_request *req;
 
 	if (!(jp->flags & PKG_PATTERN_FLAG_FILE)) {
-		if (j->type == PKG_JOBS_UPGRADE && jp->match == MATCH_EXACT) {
+		if (j->type == PKG_JOBS_UPGRADE && jp->match == MATCH_INTERNAL) {
 			/*
 			 * For upgrade patterns we must ensure that a local package is
 			 * installed as well.  This only works if we're operating on an
@@ -1275,6 +1260,7 @@ pkg_jobs_need_upgrade(struct pkg *rp, struct pkg *lp)
 			free(l1);
 			return (true);
 		}
+		i++;
 	}
 	free(l1);
 
@@ -1296,6 +1282,7 @@ pkg_jobs_need_upgrade(struct pkg *rp, struct pkg *lp)
 			free(l1);
 			return (true);
 		}
+		i++;
 	}
 	free(l1);
 
@@ -1510,7 +1497,7 @@ pkg_jobs_check_remote_candidate(struct pkg_jobs *j, struct pkg *pkg)
 	if (pkg->digest == NULL)
 		return (true);
 
-	it = pkgdb_repo_query(j->db, pkg->uid, MATCH_EXACT, j->reponame);
+	it = pkgdb_repo_query(j->db, pkg->uid, MATCH_INTERNAL, j->reponame);
 	if (it != NULL) {
 		/*
 		 * If we have the same package in a remote repo, it is not an
@@ -1550,6 +1537,7 @@ pkg_jobs_find_install_candidates(struct pkg_jobs *j)
 		return (NULL);
 
 	while (pkgdb_it_next(it, &pkg, PKG_LOAD_BASIC) == EPKG_OK) {
+
 		if ((j->flags & PKG_FLAG_FORCE) ||
 						pkg_jobs_check_remote_candidate(j, pkg)) {
 			tll_push_front(*candidates, pkg->id);
@@ -1592,7 +1580,7 @@ jobs_solve_full_upgrade(struct pkg_jobs *j)
 		pkg = NULL;
 		while (pkgdb_it_next(it, &pkg, flags) == EPKG_OK) {
 			/* Do not test we ignore what doesn't exists remotely */
-			pkg_jobs_find_upgrade(j, pkg->uid, MATCH_EXACT);
+			pkg_jobs_find_upgrade(j, pkg->uid, MATCH_INTERNAL);
 		}
 		pkg_free(pkg);
 		pkgdb_it_free(it);
@@ -1751,7 +1739,7 @@ jobs_solve_fetch(struct pkg_jobs *j)
 			}
 			else {
 				/* Do not test we ignore what doesn't exists remotely */
-				pkg_jobs_find_upgrade(j, pkg->uid, MATCH_EXACT);
+				pkg_jobs_find_upgrade(j, pkg->uid, MATCH_INTERNAL);
 			}
 			pkg = NULL;
 		}
@@ -2069,9 +2057,9 @@ pkg_jobs_handle_install(struct pkg_solved *ps, struct pkg_jobs *j,
 		flags |= PKG_ADD_AUTOMATIC;
 
 	if (old != NULL)
-		retcode = pkg_add_upgrade(j->db, target, flags, keys, NULL, new, old);
+		retcode = pkg_add_upgrade(j->db, target, flags, keys, NULL, new, old, &j->triggers);
 	else
-		retcode = pkg_add_from_remote(j->db, target, flags, keys, NULL, new);
+		retcode = pkg_add_from_remote(j->db, target, flags, keys, NULL, new, &j->triggers);
 
 	return (retcode);
 }
@@ -2085,9 +2073,8 @@ pkg_jobs_execute(struct pkg_jobs *j)
 	int flags = 0;
 	int retcode = EPKG_FATAL;
 	pkg_plugin_hook_t pre, post;
-	trigger_t *cleanup_triggers;
 
-	cleanup_triggers = triggers_load(true);
+//j->triggers.cleanup = triggers_load(true);
 	if (j->type == PKG_JOBS_INSTALL) {
 		pre = PKG_PLUGIN_HOOK_PRE_INSTALL;
 		post = PKG_PLUGIN_HOOK_POST_INSTALL;
@@ -2155,9 +2142,9 @@ pkg_jobs_execute(struct pkg_jobs *j)
 			 * in further they will be upgraded correctly.
 			 */
 			if (j->type == PKG_JOBS_UPGRADE)
-				retcode = pkg_delete(p, j->db, flags | PKG_DELETE_CONFLICT);
+				retcode = pkg_delete(p, j->db, flags | PKG_DELETE_CONFLICT, &j->triggers);
 			else
-				retcode = pkg_delete(p, j->db, flags);
+				retcode = pkg_delete(p, j->db, flags, &j->triggers);
 			if (retcode != EPKG_OK)
 				goto cleanup;
 			break;
@@ -2182,7 +2169,7 @@ pkg_jobs_execute(struct pkg_jobs *j)
 	}
 
 	pkg_plugins_hook_run(post, j, j->db);
-	triggers_execute(cleanup_triggers);
+	triggers_execute(j->triggers.cleanup);
 
 cleanup:
 	pkgdb_release_lock(j->db, PKGDB_LOCK_EXCLUSIVE);
