@@ -1,5 +1,0 @@
-project: pkg
-target: pkg
-
-cmds:
-  - cmd: /pkg add @@
